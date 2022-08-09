@@ -1,0 +1,290 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Publish = void 0;
+const until_1 = require("@open-draft/until");
+const outvariant_1 = require("outvariant");
+const Command_1 = require("../Command");
+const createContext_1 = require("../utils/createContext");
+const getInfo_1 = require("../utils/git/getInfo");
+const getNextReleaseType_1 = require("../utils/getNextReleaseType");
+const getNextVersion_1 = require("../utils/getNextVersion");
+const getCommits_1 = require("../utils/git/getCommits");
+const getCurrentBranch_1 = require("../utils/git/getCurrentBranch");
+const getLatestRelease_1 = require("../utils/git/getLatestRelease");
+const bumpPackageJson_1 = require("../utils/bumpPackageJson");
+const getTags_1 = require("../utils/git/getTags");
+const execAsync_1 = require("../utils/execAsync");
+const commit_1 = require("../utils/git/commit");
+const createTag_1 = require("../utils/git/createTag");
+const push_1 = require("../utils/git/push");
+const getReleaseRefs_1 = require("../utils/getReleaseRefs");
+const parseCommits_1 = require("../utils/git/parseCommits");
+const createComment_1 = require("../utils/github/createComment");
+const createReleaseComment_1 = require("../utils/createReleaseComment");
+const env_1 = require("../utils/env");
+const notes_1 = require("./notes");
+class Publish extends Command_1.Command {
+    static command = 'publish';
+    static description = 'Publish the package';
+    static builder = (yargs) => {
+        return yargs.usage('$0 publish [options]').option('dry-run', {
+            alias: 'd',
+            type: 'boolean',
+            default: false,
+            demandOption: false,
+            description: 'Print command steps without executing them',
+        });
+    };
+    context = null;
+    /**
+     * The list of clean-up functions to invoke if release fails.
+     */
+    revertQueue = [];
+    run = async () => {
+        await (0, env_1.demandGitHubToken)().catch((error) => {
+            this.log.error(error.message);
+            process.exit(1);
+        });
+        this.revertQueue = [];
+        // Extract repository information (remote/owner/name).
+        const repo = await (0, getInfo_1.getInfo)();
+        const branchName = await (0, getCurrentBranch_1.getCurrentBranch)();
+        this.log.info((0, outvariant_1.format)('preparing release for "%s/%s" from branch "%s"...', repo.owner, repo.name, branchName));
+        // Get the latest release.
+        const tags = await (0, getTags_1.getTags)();
+        const latestRelease = await (0, getLatestRelease_1.getLatestRelease)(tags);
+        if (latestRelease) {
+            this.log.info((0, outvariant_1.format)('found latest release: %s (%s)', latestRelease.tag, latestRelease.hash));
+        }
+        else {
+            this.log.info('found no previous releases, creating the first one...');
+        }
+        const rawCommits = await (0, getCommits_1.getCommits)({
+            since: latestRelease?.hash,
+        });
+        this.log.info((0, outvariant_1.format)('found %d new %s:\n%s', rawCommits.length, rawCommits.length > 1 ? 'commits' : 'commit', rawCommits
+            .map((commit) => (0, outvariant_1.format)('  - %s %s', commit.hash, commit.subject))
+            .join('\n')));
+        const commits = await (0, parseCommits_1.parseCommits)(rawCommits);
+        this.log.info('successfully parsed commits: %d', commits.length);
+        if (commits.length === 0) {
+            this.log.warn('no commits since the latest release, skipping...');
+            return;
+        }
+        // Get the next release type and version number.
+        const nextReleaseType = (0, getNextReleaseType_1.getNextReleaseType)(commits);
+        if (!nextReleaseType) {
+            this.log.warn('committed changes do not bump version, skipping...');
+            return;
+        }
+        this.log.info((0, outvariant_1.format)('next release type: %s', nextReleaseType));
+        const prevVersion = latestRelease?.tag || 'v0.0.0';
+        const nextVersion = (0, getNextVersion_1.getNextVersion)(prevVersion, nextReleaseType);
+        this.context = (0, createContext_1.createContext)({
+            repo,
+            latestRelease,
+            nextRelease: {
+                version: nextVersion,
+                publishedAt: new Date(),
+            },
+        });
+        this.log.info((0, outvariant_1.format)('next version: %s -> %s', prevVersion.replace(/^v/, ''), this.context.nextRelease.version));
+        // Bump the version in package.json without committing it.
+        if (this.argv.dryRun) {
+            this.log.warn((0, outvariant_1.format)('skip version bump in package.json in dry-run mode (next: %s)', nextVersion));
+        }
+        else {
+            (0, bumpPackageJson_1.bumpPackageJson)(nextVersion);
+            this.log.info('bumped version in package.json to:', nextVersion);
+        }
+        // Execute the publishing script.
+        await this.runReleaseScript();
+        const result = await (0, until_1.until)(async () => {
+            await this.createReleaseCommit();
+            await this.createReleaseTag();
+            // await this.pushToRemote()
+            const releaseNotes = await this.generateReleaseNotes(commits);
+            const releaseUrl = await this.createGitHubRelease(releaseNotes);
+            return {
+                releaseUrl,
+            };
+        });
+        // Handle any errors during the release process the same way.
+        if (result.error) {
+            this.log.error(result.error.message);
+            /**
+             * @todo Suggest a standalone command to repeat the commit/tag/release
+             * part of the publishing. The actual publish script was called anyway,
+             * so the package has been published at this point, just the Git info
+             * updates are missing.
+             */
+            this.log.error('release failed, reverting changes...');
+            // Revert changes in case of errors.
+            await this.revertChanges();
+            return process.exit(1);
+        }
+        // Comment on each relevant GitHub issue.
+        await this.commentOnIssues(commits, result.data.releaseUrl);
+        if (this.argv.dryRun) {
+            this.log.warn((0, outvariant_1.format)('release "%s" completed in dry-run mode!', this.context.nextRelease.tag));
+            return;
+        }
+        this.log.info((0, outvariant_1.format)('release "%s" completed!', this.context.nextRelease.tag));
+    };
+    /**
+     * Execute the release script specified in the configuration.
+     */
+    async runReleaseScript() {
+        const env = {
+            RELEASE_VERSION: this.context.nextRelease.version,
+        };
+        this.log.info('preparing to run the publishing script with:\n%o', env);
+        if (this.argv.dryRun) {
+            this.log.warn('skip executing publishing script in dry-run mode');
+            return;
+        }
+        this.log.info('executing publishing script...');
+        const publishResult = await (0, until_1.until)(() => {
+            return (0, execAsync_1.execAsync)(this.config.script, {
+                env: {
+                    ...process.env,
+                    ...env,
+                },
+            });
+        });
+        (0, outvariant_1.invariant)(publishResult.error == null, 'Failed to publish: the publish script exited.\n%s', publishResult.error?.message);
+        this.log.info(publishResult.data);
+        this.log.info('published successfully!');
+    }
+    /**
+     * Revert those changes that were marked as revertable.
+     */
+    async revertChanges() {
+        let revert;
+        while ((revert = this.revertQueue.pop())) {
+            await revert();
+        }
+    }
+    /**
+     * Create a release commit in Git.
+     */
+    async createReleaseCommit() {
+        const message = `chore(release): ${this.context.nextRelease.tag}`;
+        if (this.argv.dryRun) {
+            this.log.warn((0, outvariant_1.format)('skip creating a release commit in dry-run mode: "%s"', message));
+            return;
+        }
+        const commitResult = await (0, until_1.until)(() => {
+            return (0, commit_1.commit)({
+                files: ['package.json'],
+                message,
+            });
+        });
+        (0, outvariant_1.invariant)(commitResult.error == null, 'Failed to create release commit!\n', commitResult.error);
+        this.log.info((0, outvariant_1.format)('created a release commit at "%s"!', commitResult.data.hash));
+        this.revertQueue.push(async () => {
+            this.log.info('reverting the release commit...');
+            const hasChanges = await (0, execAsync_1.execAsync)('git diff');
+            if (hasChanges) {
+                this.log.info('detected uncommitted changes, stashing...');
+                await (0, execAsync_1.execAsync)('git stash');
+            }
+            await (0, execAsync_1.execAsync)('git reset --hard HEAD~1').finally(async () => {
+                if (hasChanges) {
+                    this.log.info('unstashing uncommitted changes...');
+                    await (0, execAsync_1.execAsync)('git stash pop');
+                }
+            });
+        });
+    }
+    /**
+     * Create a release tag in Git.
+     */
+    async createReleaseTag() {
+        const nextTag = this.context.nextRelease.tag;
+        if (this.argv.dryRun) {
+            this.log.warn((0, outvariant_1.format)('skip creating a release tag in dry-run mode: %s', nextTag));
+            return;
+        }
+        const tagResult = await (0, until_1.until)(async () => {
+            const tag = await (0, createTag_1.createTag)(nextTag);
+            await (0, execAsync_1.execAsync)(`git push origin ${tag}`);
+            return tag;
+        });
+        (0, outvariant_1.invariant)(tagResult.error == null, 'Failed to tag the release!\n', tagResult.error);
+        this.revertQueue.push(async () => {
+            const tagToRevert = this.context.nextRelease.tag;
+            this.log.info((0, outvariant_1.format)('reverting the release tag "%s"...', tagToRevert));
+            await (0, execAsync_1.execAsync)(`git tag -d ${tagToRevert}`);
+            await (0, execAsync_1.execAsync)(`git push --delete origin ${tagToRevert}`);
+        });
+        this.log.info((0, outvariant_1.format)('created release tag "%s"!', tagResult.data));
+    }
+    /**
+     * Generate release notes from the given commits.
+     */
+    async generateReleaseNotes(commits) {
+        const releaseNotes = await notes_1.Notes.generateReleaseNotes(this.context, commits);
+        this.log.info(`generated release notes:\n\n${releaseNotes}\n`);
+        return releaseNotes;
+    }
+    /**
+     * Push the release commit and tag to the remote.
+     */
+    async pushToRemote() {
+        if (this.argv.dryRun) {
+            this.log.warn('skip pushing release to Git in dry-run mode');
+            return;
+        }
+        const pushResult = await (0, until_1.until)(() => (0, push_1.push)());
+        (0, outvariant_1.invariant)(pushResult.error == null, 'Failed to push changes to origin!\n', pushResult.error);
+        this.log.info('pushed changes to "%s" (origin)!', this.context.repo.remote);
+    }
+    /**
+     * Create a new GitHub release.
+     */
+    async createGitHubRelease(releaseNotes) {
+        if (this.argv.dryRun) {
+            this.log.warn('skip creating a GitHub release in dry-run mode');
+            return '#';
+        }
+        const release = await notes_1.Notes.createRelease(this.context, releaseNotes);
+        const { html_url: releaseUrl } = release;
+        this.log.info((0, outvariant_1.format)('created release: %s', releaseUrl));
+        return releaseUrl;
+    }
+    /**
+     * Comment on referenced GitHub issues and pull requests.
+     */
+    async commentOnIssues(commits, releaseUrl) {
+        const issueIds = await (0, getReleaseRefs_1.getReleaseRefs)(commits);
+        const releaseCommentText = (0, createReleaseComment_1.createReleaseComment)({
+            context: this.context,
+            releaseUrl,
+        });
+        if (issueIds.size > 0) {
+            const issuesCount = issueIds.size;
+            const issuesNoun = issuesCount === 1 ? 'issue' : 'issues';
+            const issuesDisplayList = Array.from(issueIds)
+                .map((id) => `  - ${id}`)
+                .join('\n');
+            if (this.argv.dryRun) {
+                this.log.warn((0, outvariant_1.format)('skip commenting on %d GitHub %s:\n%s', issueIds.size, issuesNoun, issuesDisplayList));
+                return;
+            }
+            this.log.info((0, outvariant_1.format)('commenting on %d GitHub %s:\n%s', issuesCount, issuesNoun, issuesDisplayList));
+            const commentPromises = [];
+            for (const issueId of issueIds) {
+                commentPromises.push((0, createComment_1.createComment)(issueId, releaseCommentText).catch((error) => {
+                    this.log.error((0, outvariant_1.format)('commenting on issue "%s" failed: %s', error.message));
+                }));
+            }
+            await Promise.allSettled(commentPromises);
+        }
+        else {
+            this.log.info('no referenced GitHub issues, nothing to comment!');
+        }
+    }
+}
+exports.Publish = Publish;
+//# sourceMappingURL=publish.js.map

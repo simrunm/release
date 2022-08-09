@@ -19,7 +19,9 @@
     "release": "./bin/cli.sh publish"
   },
   "devDependencies": {
+    "@ossjs/release": "^0.3.2",
     "@types/jest": "^27.4.1",
+    "@types/wicg-file-system-access": "^2020.9.5",
     "dotenv": "^16.0.0",
     "fs-teardown": "^0.3.2",
     "jest": "^27.5.1",
