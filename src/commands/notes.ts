@@ -138,7 +138,9 @@ export class Notes extends Command<Argv> {
     // Generate release notes for the commits.
     const releaseNotes = await Notes.generateReleaseNotes(context, commits)
     this.log.info(format('generated release notes:\n%s', releaseNotes))
-    //save this to markdown
+    const fs = require("fs");
+    fs.writeFileSync("release-notes.md", releaseNotes)
+
 
     // Create GitHub release.
     const release = await Notes.createRelease(context, releaseNotes)
