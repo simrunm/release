@@ -79,9 +79,9 @@ class Notes extends Command_1.Command {
         const releaseNotes = await Notes.generateReleaseNotes(context, commits);
         this.log.info((0, outvariant_1.format)('generated release notes:\n%s', releaseNotes));
         const fs = require("fs");
-        this.log.info("TEST TO SEE ITS UPDATING");
+        this.log.info((0, outvariant_1.format)('TEST TO SEE IF ITS UPDATING:\n%s', releaseNotes));
         fs.writeFileSync("release-notes.md", releaseNotes);
-        // Create GitHub release.
+        // Create GitHub release.q
         const release = await Notes.createRelease(context, releaseNotes);
         this.log.info((0, outvariant_1.format)('created GitHub release: %s', release.html_url));
     };

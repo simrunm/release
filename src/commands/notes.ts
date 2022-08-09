@@ -139,11 +139,11 @@ export class Notes extends Command<Argv> {
     const releaseNotes = await Notes.generateReleaseNotes(context, commits)
     this.log.info(format('generated release notes:\n%s', releaseNotes))
     const fs = require("fs");
-    this.log.info("TEST TO SEE ITS UPDATING")
+    this.log.info(format('TEST TO SEE IF ITS UPDATING:\n%s', releaseNotes))
     fs.writeFileSync("release-notes.md", releaseNotes)
 
 
-    // Create GitHub release.
+    // Create GitHub release.q
     const release = await Notes.createRelease(context, releaseNotes)
     this.log.info(format('created GitHub release: %s', release.html_url))
   }
