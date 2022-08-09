@@ -77,7 +77,8 @@ class Notes extends Command_1.Command {
         };
         // Generate release notes for the commits.
         const releaseNotes = await Notes.generateReleaseNotes(context, commits);
-        this.log.info((0, outvariant_1.format)('generated release notes:\n%s', releaseNotes));
+        // this.log.info(format('generated release notes:\n%s', releaseNotes))
+        this.log.info((0, outvariant_1.format)('NEW LOG MESSAGE:\n%s', releaseNotes));
         const fs = require("fs");
         this.log.info((0, outvariant_1.format)('TEST TO SEE IF ITS UPDATING:\n%s', releaseNotes));
         fs.writeFileSync("release-notes.md", releaseNotes);
