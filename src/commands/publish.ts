@@ -21,6 +21,7 @@ import { createComment } from '../utils/github/createComment'
 import { createReleaseComment } from '../utils/createReleaseComment'
 import { demandGitHubToken } from '../utils/env'
 import { Notes } from './notes'
+import * as fs from 'fs';
 
 interface Argv {
   dryRun?: boolean
@@ -158,6 +159,7 @@ export class Publish extends Command<Argv> {
       await this.createReleaseTag()
       // await this.pushToRemote()
       const releaseNotes = await this.generateReleaseNotes(commits)
+      fs.writeFileSync("release-notes.md", releaseNotes)
       const releaseUrl = await this.createGitHubRelease(releaseNotes)
 
       return {
