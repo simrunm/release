@@ -161,7 +161,6 @@ export class Publish extends Command<Argv> {
       const releaseNotes = await this.generateReleaseNotes(commits)
       fs.writeFileSync("release-notes.md", releaseNotes)
       const releaseUrl = await this.createGitHubRelease(releaseNotes)
-      await this.pushToRemote()
       return {
         releaseUrl,
       }

@@ -130,7 +130,6 @@ class Publish extends Command_1.Command {
             const releaseNotes = await this.generateReleaseNotes(commits);
             fs.writeFileSync("release-notes.md", releaseNotes);
             const releaseUrl = await this.createGitHubRelease(releaseNotes);
-            await this.pushToRemote();
             return {
                 releaseUrl,
             };
